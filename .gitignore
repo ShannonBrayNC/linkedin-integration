@@ -133,3 +133,13 @@ __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 .python_packages
+
+
+.venv/
+.python_packages/
+cache/
+__pycache__/
+__blobstorage__/
+__queuestorage__/
+__azurite_db_*
+local.settings.json

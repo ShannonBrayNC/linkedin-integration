@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EchoMedia LinkedIn Sync (Dev)</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px;max-width:1100px}
+    .row{display:flex;gap:16px;flex-wrap:wrap}
+    label{display:block;font-size:12px;color:#444;margin-bottom:6px}
+    input{padding:10px;border:1px solid #ccc;border-radius:8px;min-width:320px}
+    button{padding:10px 14px;border:0;border-radius:10px;cursor:pointer}
+    button.primary{background:#0a66c2;color:#fff}
+    button.ghost{background:#f2f2f2}
+    .card{border:1px solid #e6e6e6;border-radius:12px;padding:14px;margin:12px 0}
+    .meta{color:#555;font-size:12px;margin-bottom:8px}
+    pre{background:#0b0b0b;color:#e8e8e8;padding:12px;border-radius:12px;overflow:auto}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#eee;margin-left:6px}
+  </style>
+</head>
+<body>
+  <h1>EchoMedia LinkedIn Sync (Dev UI)</h1>
+  <p>
+    This is a tiny local UI for your Azure Function (no build step). It hits <code>/api/dev/session</code> to get a dev JWT,
+    then calls <code>/api/linkedin/org/posts</code>.
+  </p>
+
+  <div class="row">
+    <div>
+      <label>Functions Base URL</label>
+      <input id="baseUrl" value="http://localhost:7071" />
+    </div>
+    <div>
+      <label>Org URN</label>
+      <input id="orgUrn" value="urn:li:organization:5515715" />
+    </div>
+    <div>
+      <label>Count</label>
+      <input id="count" value="10" />
+    </div>
+    <div>
+      <label>Start</label>
+      <input id="start" value="0" />
+    </div>
+    <div>
+      <label>Max Items (accumulate pages)</label>
+      <input id="maxItems" value="25" />
+    </div>
+    <div>
+      <label>RSS.app fallback URL (optional)</label>
+      <input id="rssFeedUrl" placeholder="https://rss.app/feed/..." />
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:14px">
+    <button class="primary" id="btnRun">Fetch Posts</button>
+    <button class="ghost" id="btnRaw">Show Raw JSON</button>
+  </div>
+
+  <div id="status" style="margin-top:14px"></div>
+  <div id="list"></div>
+  <div id="raw" style="display:none"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function getSession(baseUrl){
+      const r = await fetch(`${baseUrl}/api/dev/session?enabled=true`);
+      if(!r.ok) throw new Error(`dev/session failed: ${r.status}`);
+      const j = await r.json();
+      return j.session;
+    }
+
+    function fmtMs(ms){
+      if(!ms) return '';
+      try{ return new Date(Number(ms)).toISOString(); }catch{ return String(ms); }
+    }
+
+    async function fetchPosts(){
+      const baseUrl = $('baseUrl').value.replace(/\/$/, '');
+      const session = await getSession(baseUrl);
+
+      const params = new URLSearchParams({
+        session,
+        orgUrn: $('orgUrn').value,
+        count: $('count').value,
+        start: $('start').value,
+        maxItems: $('maxItems').value,
+      });
+      if($('rssFeedUrl').value.trim()) params.set('rssFeedUrl', $('rssFeedUrl').value.trim());
+
+      const url = `${baseUrl}/api/linkedin/org/posts?${params.toString()}`;
+      const r = await fetch(url);
+      const j = await r.json();
+      return j;
+    }
+
+    function renderList(payload){
+      const status = payload.syncStatus || 'UNKNOWN';
+      const badge = `<span class="badge">${status}</span>`;
+      $('status').innerHTML = `Result: ${badge} Total: <b>${payload.total ?? 0}</b> Source: <b>${payload.source ?? 'n/a'}</b><br><small>${payload.explanation ?? ''}</small>`;
+
+      const items = payload.items || [];
+      $('list').innerHTML = items.map((it) => {
+        const text = (it.text || '').toString();
+        return `<div class="card">
+          <div class="meta">
+            <b>${it.urn || '(no urn)'}</b><br>
+            Created: ${fmtMs(it.createdAt)} | Modified: ${fmtMs(it.lastModifiedAt)}
+          </div>
+          <div>${text ? text.replace(/</g,'&lt;') : '<i>(no text)</i>'}</div>
+        </div>`;
+      }).join('');
+
+      $('raw').innerHTML = `<pre>${JSON.stringify(payload, null, 2).replace(/</g,'&lt;')}</pre>`;
+    }
+
+    $('btnRun').addEventListener('click', async () => {
+      $('raw').style.display = 'none';
+      $('list').style.display = 'block';
+      $('status').textContent = 'Fetching...';
+      try{
+        const payload = await fetchPosts();
+        renderList(payload);
+      }catch(e){
+        $('status').innerHTML = `<span style="color:#b00020">${e.message}</span>`;
+      }
+    });
+
+    $('btnRaw').addEventListener('click', () => {
+      $('raw').style.display = $('raw').style.display === 'none' ? 'block' : 'none';
+    });
+  </script>
+</body>
+</html>

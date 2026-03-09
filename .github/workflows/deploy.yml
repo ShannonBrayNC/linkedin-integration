@@ -2,15 +2,19 @@ name: Deploy Azure Function (linkedin-integration)
 
 on:
   push:
-    branches: [ "master" ]
+    branches:
+      - master
+  workflow_dispatch:
 
 env:
   AZURE_FUNCTIONAPP_NAME: linkedin-integration-func-12345
   AZURE_FUNCTIONAPP_PACKAGE_PATH: .
+  PYTHON_VERSION: "3.11"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,7 +22,15 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Show repo contents
+        run: |
+          pwd
+          ls -la
+          test -f host.json && echo "host.json found"
+          test -f function_app.py && echo "function_app.py found"
+          test -f requirements.txt && echo "requirements.txt found"
 
       - name: Install dependencies
         run: |

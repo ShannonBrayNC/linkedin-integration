@@ -1,7 +1,7 @@
 import os
 import json
 import hashlib
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import azure.functions as func
@@ -40,9 +40,10 @@ def _cors_headers(req: func.HttpRequest) -> Dict[str, str]:
             "Access-Control-Allow-Origin": origin,
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS,POST",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization,x-admin-key",
         }
     return {}
+
 
 def _preflight(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(status_code=204, headers=_cors_headers(req))
@@ -64,9 +65,27 @@ def _cache_is_fresh(cached: Dict[str, Any]) -> bool:
     except Exception:
         return False
 
+
+def _to_int(value: Optional[str], default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        n = int(value) if value is not None and str(value).strip() != "" else default
+    except Exception:
+        n = default
+    if minimum is not None:
+        n = max(minimum, n)
+    if maximum is not None:
+        n = min(maximum, n)
+    return n
+
+
+
 # ----------------------------
 # Routes
 # ----------------------------
+
+
+
+
 @app.route(route="health", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def health(req: func.HttpRequest) -> func.HttpResponse:
     if req.method.upper() == "OPTIONS":
@@ -103,7 +122,11 @@ def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
     if req.method.upper() == "OPTIONS":
         return _preflight(req)
 
-    provided = (req.params.get("key") or "").strip()
+    provided = (
+        req.headers.get("x-admin-key")
+        or req.params.get("key")
+        or ""
+    ).strip()
     if not CACHE_FLUSH_KEY or provided != CACHE_FLUSH_KEY:
         return func.HttpResponse(
             json.dumps({"ok": False, "error": "Unauthorized"}),
@@ -121,6 +144,78 @@ def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json",
         headers=_cors_headers(req),
     )
+
+
+
+@app.route(route="admin/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+def admin_routes(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/admin/routes?key=SECRET
+
+    Lists the routes this function app is expected to expose.
+    Protected with the same CACHE_FLUSH_KEY used by the flush endpoint.
+    """
+    if req.method.upper() == "OPTIONS":
+        return _preflight(req)
+
+    provided = (
+        req.headers.get("x-admin-key")
+        or req.params.get("key")
+        or ""
+    ).strip()
+
+    if not CACHE_FLUSH_KEY or provided != CACHE_FLUSH_KEY:
+        return func.HttpResponse(
+            json.dumps({"ok": False, "error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json",
+            headers=_cors_headers(req),
+        )
+
+    routes = [
+        {
+            "name": "health",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/health",
+        },
+        {
+            "name": "dev_session",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/dev/session",
+        },
+        {
+            "name": "admin_cache_flush",
+            "methods": ["POST", "OPTIONS"],
+            "route": "/api/admin/cache/flush",
+        },
+        {
+            "name": "admin_routes",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/admin/routes",
+        },
+        {
+            "name": "linkedin_org_posts",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/linkedin/org/posts",
+        },
+    ]
+
+    payload = {
+        "ok": True,
+        "count": len(routes),
+        "routes": routes,
+        "utc": iso_utc(utc_now()),
+    }
+
+    return func.HttpResponse(
+        json.dumps(payload, indent=2),
+        status_code=200,
+        mimetype="application/json",
+        headers=_cors_headers(req),
+    )
+
+
+
 
 @app.route(route="linkedin/org/posts", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
@@ -153,8 +248,9 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         org_urn = f"urn:li:organization:{org_id}"
 
     # paging inputs (client-side)
-    count = int(req.params.get("count") or "10")
-    start = int(req.params.get("start") or "0")
+    count = _to_int(req.params.get("count"), 10, minimum=1, maximum=100)
+    start = _to_int(req.params.get("start"), 0, minimum=0)
+    ttl = _to_int(req.params.get("cacheTtlSeconds"), DEFAULT_TTL_SECONDS, minimum=30, maximum=86400)
 
     if not org_urn:
         return func.HttpResponse(
@@ -168,13 +264,9 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
     # - allow override per call: linkedinVersion=202601
     # - otherwise env LI_API_VERSION
     v = (req.params.get("linkedinVersion") or LI_API_VERSION_DEFAULT).strip()
-    # normalize: keep only digits
     v_digits = "".join([c for c in v if c.isdigit()])
-    # If someone passes 20240101, LinkedIn may reject; prefer YYYYMM.
     version = v_digits[:6] if len(v_digits) >= 6 else LI_API_VERSION_DEFAULT
 
-    # Cache setup
-    ttl = int(req.params.get("cacheTtlSeconds") or str(DEFAULT_TTL_SECONDS))
     now = utc_now()
 
     # IMPORTANT: cache key should *not* include count/start if you want to cache once per org/version,

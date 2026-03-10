@@ -8,11 +8,13 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: linkedin-integration-func-2
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: .
+  PACKAGE_PATH: .
+  PYTHON_VERSION: "3.11"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     permissions:
       id-token: write
       contents: read
@@ -20,6 +22,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Validate package contents
+        run: |
+          echo "Repo root:"
+          pwd
+          echo "Top-level files:"
+          ls -la
+          test -f host.json || (echo "host.json missing" && exit 1)
+          test -f function_app.py || (echo "function_app.py missing" && exit 1)
+          test -f requirements.txt || (echo "requirements.txt missing" && exit 1)
+          test -d shared || (echo "shared folder missing" && exit 1)
 
       - name: Azure login
         uses: azure/login@v2
@@ -32,6 +50,23 @@ jobs:
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          package: ${{ env.PACKAGE_PATH }}
           remote-build: true
           respect-funcignore: true
+
+      - name: Smoke test health endpoint
+        shell: bash
+        run: |
+          APP_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}-bcchc8g6apb3dsca.eastus-01.azurewebsites.net/api/health"
+          echo "Testing $APP_URL"
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /tmp/health.txt -w "%{http_code}" "$APP_URL" || true)
+            BODY=$(cat /tmp/health.txt 2>/dev/null || true)
+            echo "Attempt $i -> HTTP $STATUS Body: $BODY"
+            if [ "$STATUS" = "200" ] && [ "$BODY" = "ok" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health endpoint did not return expected response"
+          exit 1

@@ -111,110 +111,85 @@ def dev_session(req: func.HttpRequest) -> func.HttpResponse:
         headers=_cors_headers(req),
     )
 
-@app.route(route="ops/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
-def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    POST /api/admin/cache/flush?key=SECRET&prefix=linkedin/posts/
-    If key doesn't match CACHE_FLUSH_KEY, returns 401.
-
-    Tip: you can wire an "Admin flush" button in the property pane that calls this.
-    """
-    if req.method.upper() == "OPTIONS":
-        return _preflight(req)
-
-    provided = (
-        req.headers.get("x-admin-key")
-        or req.params.get("key")
-        or ""
-    ).strip()
-    if not CACHE_FLUSH_KEY or provided != CACHE_FLUSH_KEY:
-        return func.HttpResponse(
-            json.dumps({"ok": False, "error": "Unauthorized"}),
-            status_code=401,
-            mimetype="application/json",
-            headers=_cors_headers(req),
-        )
-
-    prefix = (req.params.get("prefix") or "linkedin/posts/").strip()
-
-    deleted = cache_backend.delete_prefix(prefix)
-    return func.HttpResponse(
-        json.dumps({"ok": True, "deleted": deleted, "prefix": prefix}),
-        status_code=200,
-        mimetype="application/json",
-        headers=_cors_headers(req),
-    )
-
-
+# -------------------------------
+# OPS ROUTES
+# -------------------------------
 
 @app.route(route="ops/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def admin_routes(req: func.HttpRequest) -> func.HttpResponse:
     """
-    GET /api/admin/routes?key=SECRET
-
-    Lists the routes this function app is expected to expose.
-    Protected with the same CACHE_FLUSH_KEY used by the flush endpoint.
+    GET /api/ops/routes?key=SECRET
+    Returns the list of available routes for diagnostics.
     """
-    if req.method.upper() == "OPTIONS":
-        return _preflight(req)
 
-    provided = (
-        req.headers.get("x-admin-key")
-        or req.params.get("key")
-        or ""
-    ).strip()
-
-    if not CACHE_FLUSH_KEY or provided != CACHE_FLUSH_KEY:
+    key = req.params.get("key") or req.headers.get("x-admin-key")
+    if key != os.getenv("CACHE_FLUSH_KEY"):
         return func.HttpResponse(
-            json.dumps({"ok": False, "error": "Unauthorized"}),
+            json.dumps({"error": "unauthorized"}),
             status_code=401,
             mimetype="application/json",
-            headers=_cors_headers(req),
         )
 
     routes = [
         {
             "name": "health",
-            "methods": ["GET", "OPTIONS"],
+            "method": "GET",
             "route": "/api/health",
         },
         {
-            "name": "dev_session",
-            "methods": ["GET", "OPTIONS"],
-            "route": "/api/dev/session",
+            "name": "linkedin_org_posts",
+            "method": "GET",
+            "route": "/api/linkedin/org/posts",
         },
         {
-            "name": "admin_cache_flush",
-            "methods": ["POST", "OPTIONS"],
-            "route": "/api/ops/cache/flush",
-        },
-        {
-            "name": "admin_routes",
-            "methods": ["GET", "OPTIONS"],
+            "name": "ops_routes",
+            "method": "GET",
             "route": "/api/ops/routes",
         },
         {
-            "name": "linkedin_org_posts",
-            "methods": ["GET", "OPTIONS"],
-            "route": "/api/linkedin/org/posts",
+            "name": "ops_cache_flush",
+            "method": "POST",
+            "route": "/api/ops/cache/flush",
         },
     ]
 
-    payload = {
-        "ok": True,
-        "count": len(routes),
-        "routes": routes,
-        "utc": iso_utc(utc_now()),
-    }
-
     return func.HttpResponse(
-        json.dumps(payload, indent=2),
+        json.dumps(routes),
         status_code=200,
         mimetype="application/json",
-        headers=_cors_headers(req),
     )
 
 
+@app.route(route="ops/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST /api/ops/cache/flush?key=SECRET
+    Clears the API cache.
+    """
+
+    key = req.params.get("key") or req.headers.get("x-admin-key")
+    if key != os.getenv("CACHE_FLUSH_KEY"):
+        return func.HttpResponse(
+            json.dumps({"error": "unauthorized"}),
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    try:
+        cache.clear()
+
+        return func.HttpResponse(
+            json.dumps({"status": "cache cleared"}),
+            status_code=200,
+            mimetype="application/json",
+        )
+
+    except Exception as e:
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+        )
 
 
 @app.route(route="linkedin/org/posts", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)

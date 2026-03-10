@@ -111,7 +111,7 @@ def dev_session(req: func.HttpRequest) -> func.HttpResponse:
         headers=_cors_headers(req),
     )
 
-@app.route(route="admin/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="ops/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
     """
     POST /api/admin/cache/flush?key=SECRET&prefix=linkedin/posts/
@@ -147,7 +147,7 @@ def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
 
 
 
-@app.route(route="admin/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="ops/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def admin_routes(req: func.HttpRequest) -> func.HttpResponse:
     """
     GET /api/admin/routes?key=SECRET
@@ -186,12 +186,12 @@ def admin_routes(req: func.HttpRequest) -> func.HttpResponse:
         {
             "name": "admin_cache_flush",
             "methods": ["POST", "OPTIONS"],
-            "route": "/api/admin/cache/flush",
+            "route": "/api/ops/cache/flush",
         },
         {
             "name": "admin_routes",
             "methods": ["GET", "OPTIONS"],
-            "route": "/api/admin/routes",
+            "route": "/api/ops/routes",
         },
         {
             "name": "linkedin_org_posts",

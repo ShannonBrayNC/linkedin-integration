@@ -22,16 +22,19 @@ ALLOWED_ORIGINS = {
     "https://echomediaai.sharepoint.com",
 }
 
-DEFAULT_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", str(24 * 60 * 60)))  # 24h default
+DEFAULT_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", str(24 * 60 * 60)))
 CACHE_CONTAINER = os.getenv("CACHE_CONTAINER", "cache")
-CACHE_ALLOW_STALE_ON_ERROR = (os.getenv("CACHE_ALLOW_STALE_ON_ERROR", "true").lower() == "true")
+CACHE_ALLOW_STALE_ON_ERROR = os.getenv("CACHE_ALLOW_STALE_ON_ERROR", "true").lower() == "true"
 CACHE_FLUSH_KEY = os.getenv("CACHE_FLUSH_KEY", "").strip()
 
 LI_ACCESS_TOKEN = os.getenv("LI_ACCESS_TOKEN", "").strip()
-LI_API_VERSION_DEFAULT = os.getenv("LI_API_VERSION", "202601").strip()  # LinkedIn-Version header (YYYYMM)
+LI_API_VERSION_DEFAULT = os.getenv("LI_API_VERSION", "202601").strip()
+
+cache_backend = get_cache_backend(CACHE_CONTAINER)
+
 
 # ----------------------------
-# CORS helpers
+# Helpers
 # ----------------------------
 def _cors_headers(req: func.HttpRequest) -> Dict[str, str]:
     origin = req.headers.get("origin") or req.headers.get("Origin") or ""
@@ -48,12 +51,29 @@ def _cors_headers(req: func.HttpRequest) -> Dict[str, str]:
 def _preflight(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(status_code=204, headers=_cors_headers(req))
 
-cache_backend = get_cache_backend(CACHE_CONTAINER)
+
+def _to_int(
+    value: Optional[str],
+    default: int,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    try:
+        n = int(value) if value is not None and str(value).strip() != "" else default
+    except Exception:
+        n = default
+    if minimum is not None:
+        n = max(minimum, n)
+    if maximum is not None:
+        n = min(maximum, n)
+    return n
+
 
 def _cache_key_linkedin_posts(org_urn: str, count: int, start: int, version: str) -> str:
     raw = f"{org_urn}|{count}|{start}|{version}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"linkedin/posts/{digest}.json"
+
 
 def _cache_is_fresh(cached: Dict[str, Any]) -> bool:
     exp = cached.get("_expiresAtUtc")
@@ -66,31 +86,30 @@ def _cache_is_fresh(cached: Dict[str, Any]) -> bool:
         return False
 
 
-def _to_int(value: Optional[str], default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
-    try:
-        n = int(value) if value is not None and str(value).strip() != "" else default
-    except Exception:
-        n = default
-    if minimum is not None:
-        n = max(minimum, n)
-    if maximum is not None:
-        n = min(maximum, n)
-    return n
+def _get_ops_key(req: func.HttpRequest) -> str:
+    return (req.params.get("key") or req.headers.get("x-admin-key") or "").strip()
 
+
+def _is_authorized_ops_call(req: func.HttpRequest) -> bool:
+    provided = _get_ops_key(req)
+    return bool(CACHE_FLUSH_KEY) and provided == CACHE_FLUSH_KEY
 
 
 # ----------------------------
 # Routes
 # ----------------------------
-
-
-
-
 @app.route(route="health", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def health(req: func.HttpRequest) -> func.HttpResponse:
     if req.method.upper() == "OPTIONS":
         return _preflight(req)
-    return func.HttpResponse("ok", status_code=200, headers=_cors_headers(req))
+
+    return func.HttpResponse(
+        "ok",
+        status_code=200,
+        mimetype="text/plain",
+        headers=_cors_headers(req),
+    )
+
 
 @app.route(route="dev/session", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
 def dev_session(req: func.HttpRequest) -> func.HttpResponse:
@@ -111,85 +130,99 @@ def dev_session(req: func.HttpRequest) -> func.HttpResponse:
         headers=_cors_headers(req),
     )
 
-# -------------------------------
-# OPS ROUTES
-# -------------------------------
 
-@app.route(route="ops/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
-def admin_routes(req: func.HttpRequest) -> func.HttpResponse:
+@app.route(route="ops/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+def ops_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
     """
-    GET /api/ops/routes?key=SECRET
-    Returns the list of available routes for diagnostics.
+    POST /api/ops/cache/flush?key=SECRET
     """
+    if req.method.upper() == "OPTIONS":
+        return _preflight(req)
 
-    key = req.params.get("key") or req.headers.get("x-admin-key")
-    if key != os.getenv("CACHE_FLUSH_KEY"):
+    if not _is_authorized_ops_call(req):
         return func.HttpResponse(
-            json.dumps({"error": "unauthorized"}),
+            json.dumps({"ok": False, "error": "unauthorized"}),
             status_code=401,
             mimetype="application/json",
+            headers=_cors_headers(req),
+        )
+
+    prefix = (req.params.get("prefix") or "linkedin/posts/").strip()
+
+    try:
+        deleted = cache_backend.delete_prefix(prefix)
+        return func.HttpResponse(
+            json.dumps({"ok": True, "deleted": deleted, "prefix": prefix}),
+            status_code=200,
+            mimetype="application/json",
+            headers=_cors_headers(req),
+        )
+    except Exception as e:
+        return func.HttpResponse(
+            json.dumps({"ok": False, "error": str(e)}),
+            status_code=500,
+            mimetype="application/json",
+            headers=_cors_headers(req),
+        )
+
+
+@app.route(route="ops/routes", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
+def ops_routes(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/ops/routes?key=SECRET
+    """
+    if req.method.upper() == "OPTIONS":
+        return _preflight(req)
+
+    if not _is_authorized_ops_call(req):
+        return func.HttpResponse(
+            json.dumps({"ok": False, "error": "unauthorized"}),
+            status_code=401,
+            mimetype="application/json",
+            headers=_cors_headers(req),
         )
 
     routes = [
         {
             "name": "health",
-            "method": "GET",
+            "methods": ["GET", "OPTIONS"],
             "route": "/api/health",
         },
         {
-            "name": "linkedin_org_posts",
-            "method": "GET",
-            "route": "/api/linkedin/org/posts",
-        },
-        {
-            "name": "ops_routes",
-            "method": "GET",
-            "route": "/api/ops/routes",
+            "name": "dev_session",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/dev/session",
         },
         {
             "name": "ops_cache_flush",
-            "method": "POST",
+            "methods": ["POST", "OPTIONS"],
             "route": "/api/ops/cache/flush",
+        },
+        {
+            "name": "ops_routes",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/ops/routes",
+        },
+        {
+            "name": "linkedin_org_posts",
+            "methods": ["GET", "OPTIONS"],
+            "route": "/api/linkedin/org/posts",
         },
     ]
 
+    payload = {
+        "ok": True,
+        "count": len(routes),
+        "routes": routes,
+        "utc": iso_utc(utc_now()),
+    }
+
     return func.HttpResponse(
-        json.dumps(routes),
+        json.dumps(payload, indent=2),
         status_code=200,
         mimetype="application/json",
+        headers=_cors_headers(req),
     )
-
-
-@app.route(route="ops/cache/flush", methods=["POST", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
-def admin_cache_flush(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    POST /api/ops/cache/flush?key=SECRET
-    Clears the API cache.
-    """
-
-    key = req.params.get("key") or req.headers.get("x-admin-key")
-    if key != os.getenv("CACHE_FLUSH_KEY"):
-        return func.HttpResponse(
-            json.dumps({"error": "unauthorized"}),
-            status_code=401,
-            mimetype="application/json",
-        )
-
-    try:
-        cache.clear()
-
-        return func.HttpResponse(
-            json.dumps({"status": "cache cleared"}),
-            status_code=200,
-            mimetype="application/json",
-        )
-
-    except Exception as e:
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}),
-            status_code=500,
-            mimetype="application/json",
-        )
 
 
 @app.route(route="linkedin/org/posts", methods=["GET", "OPTIONS"], auth_level=func.AuthLevel.ANONYMOUS)
@@ -197,7 +230,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
     if req.method.upper() == "OPTIONS":
         return _preflight(req)
 
-    # Lazy import to avoid cold-start failures if packaging breaks
     try:
         import requests  # type: ignore
     except Exception as e:
@@ -215,14 +247,12 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
             headers={**_cors_headers(req), "X-Cache": "BYPASS"},
         )
 
-    # Accept orgUrn OR orgId
     org_urn = (req.params.get("orgUrn") or req.params.get("orgURN") or "").strip()
     org_id = (req.params.get("orgId") or "").strip()
 
     if not org_urn and org_id:
         org_urn = f"urn:li:organization:{org_id}"
 
-    # paging inputs (client-side)
     count = _to_int(req.params.get("count"), 10, minimum=1, maximum=100)
     start = _to_int(req.params.get("start"), 0, minimum=0)
     ttl = _to_int(req.params.get("cacheTtlSeconds"), DEFAULT_TTL_SECONDS, minimum=30, maximum=86400)
@@ -235,27 +265,24 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
             headers=_cors_headers(req),
         )
 
-    # LinkedIn-Version header:
-    # - allow override per call: linkedinVersion=202601
-    # - otherwise env LI_API_VERSION
     v = (req.params.get("linkedinVersion") or LI_API_VERSION_DEFAULT).strip()
     v_digits = "".join([c for c in v if c.isdigit()])
     version = v_digits[:6] if len(v_digits) >= 6 else LI_API_VERSION_DEFAULT
 
     now = utc_now()
-
-    # IMPORTANT: cache key should *not* include count/start if you want to cache once per org/version,
-    # but your current model slices on the client. We'll cache the full set returned from LinkedIn for this request,
-    # keyed by org+count+start+version. Simple and safe.
     key = _cache_key_linkedin_posts(org_urn=org_urn, count=count, start=start, version=version)
 
     cached_entry = cache_backend.get(key)
     cached = cached_entry.payload if cached_entry else None
+
     if cached and _cache_is_fresh(cached):
         etag = compute_etag(cached)
         if_none_match = (req.headers.get("if-none-match") or req.headers.get("If-None-Match") or "").strip()
         if if_none_match and if_none_match == etag:
-            return func.HttpResponse(status_code=304, headers={**_cors_headers(req), "ETag": etag, "X-Cache": "HIT"})
+            return func.HttpResponse(
+                status_code=304,
+                headers={**_cors_headers(req), "ETag": etag, "X-Cache": "HIT"},
+            )
 
         cached_out = dict(cached)
         cached_out["cache"] = {
@@ -273,7 +300,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     if not LI_ACCESS_TOKEN:
-        # Serve stale cache if present
         if cached and CACHE_ALLOW_STALE_ON_ERROR:
             cached_out = dict(cached)
             cached_out["syncStatus"] = "DEGRADED"
@@ -300,12 +326,11 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
             headers={**_cors_headers(req), "X-Cache": "MISS"},
         )
 
-    # Call LinkedIn
     url = "https://api.linkedin.com/rest/posts"
     headers = {
         "Authorization": f"Bearer {LI_ACCESS_TOKEN}",
         "Accept": "application/json",
-        "LinkedIn-Version": version,  # YYYYMM
+        "LinkedIn-Version": version,
         "X-Restli-Protocol-Version": "2.0.0",
     }
     params = {"q": "author", "author": org_urn, "count": count, "start": start}
@@ -314,7 +339,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         r = requests.get(url, headers=headers, params=params, timeout=30)
 
         if r.status_code == 429:
-            # LinkedIn throttle: serve stale if possible
             if cached and CACHE_ALLOW_STALE_ON_ERROR:
                 cached_out = dict(cached)
                 cached_out["syncStatus"] = "DEGRADED"
@@ -345,7 +369,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         if r.status_code >= 400:
-            # Any other LinkedIn error: serve stale if possible
             if cached and CACHE_ALLOW_STALE_ON_ERROR:
                 cached_out = dict(cached)
                 cached_out["syncStatus"] = "DEGRADED"
@@ -380,9 +403,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         if not isinstance(items, list):
             items = []
 
-        # TODO (media): when you’re ready, enrich each item here by extracting media/attachments fields
-        # and return a normalized "media" object the web part can render.
-
         expires = now + timedelta(seconds=ttl)
         payload = {
             "syncStatus": "OK",
@@ -395,7 +415,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         }
 
         cache_backend.put(key, payload)
-
         etag = compute_etag(payload)
 
         return func.HttpResponse(
@@ -406,7 +425,6 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except Exception as e:
-        # Exception: serve stale if possible
         if cached and CACHE_ALLOW_STALE_ON_ERROR:
             cached_out = dict(cached)
             cached_out["syncStatus"] = "DEGRADED"

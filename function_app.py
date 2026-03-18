@@ -36,6 +36,220 @@ cache_backend = get_cache_backend(CACHE_CONTAINER)
 # ----------------------------
 # Helpers
 # ----------------------------
+
+def _li_get_json(url: str, headers: Dict[str, str], params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    try:
+        import requests  # type: ignore
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        if r.status_code >= 400:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
+def _extract_image_download_url(image_obj: Dict[str, Any]) -> Optional[str]:
+    """
+    Best-effort extraction for LinkedIn Images API responses.
+    Prefer downloadUrl if present, otherwise fall back to other likely fields.
+    """
+    candidates = [
+        image_obj.get("downloadUrl"),
+        image_obj.get("url"),
+        image_obj.get("mediaUrl"),
+        image_obj.get("originalUrl"),
+        image_obj.get("thumbnailUrl"),
+        image_obj.get("previewUrl"),
+    ]
+
+    # Common nested patterns
+    if isinstance(image_obj.get("data"), dict):
+        data = image_obj["data"]
+        candidates.extend([
+            data.get("downloadUrl"),
+            data.get("url"),
+            data.get("mediaUrl"),
+            data.get("thumbnailUrl"),
+        ])
+
+    if isinstance(image_obj.get("thumbnails"), list) and image_obj["thumbnails"]:
+        first = image_obj["thumbnails"][0] or {}
+        if isinstance(first, dict):
+            candidates.extend([
+                first.get("resolvedUrl"),
+                first.get("url"),
+            ])
+
+    for c in candidates:
+        if isinstance(c, str) and c.strip():
+            return c.strip()
+
+    return None
+
+
+def _extract_video_urls(video_obj: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """
+    Best-effort extraction for LinkedIn Videos API responses.
+    """
+    out: Dict[str, Optional[str]] = {
+        "mediaUrl": None,
+        "thumbnailUrl": None,
+    }
+
+    media_candidates = [
+        video_obj.get("downloadUrl"),
+        video_obj.get("url"),
+        video_obj.get("mediaUrl"),
+        video_obj.get("originalUrl"),
+        video_obj.get("playableUrl"),
+    ]
+
+    thumb_candidates = [
+        video_obj.get("thumbnailUrl"),
+        video_obj.get("previewUrl"),
+    ]
+
+    if isinstance(video_obj.get("data"), dict):
+        data = video_obj["data"]
+        media_candidates.extend([
+            data.get("downloadUrl"),
+            data.get("url"),
+            data.get("mediaUrl"),
+            data.get("playableUrl"),
+        ])
+        thumb_candidates.extend([
+            data.get("thumbnailUrl"),
+            data.get("previewUrl"),
+        ])
+
+    for c in media_candidates:
+        if isinstance(c, str) and c.strip():
+            out["mediaUrl"] = c.strip()
+            break
+
+    for c in thumb_candidates:
+        if isinstance(c, str) and c.strip():
+            out["thumbnailUrl"] = c.strip()
+            break
+
+    return out
+
+
+def _resolve_linkedin_image_urn(image_urn: str, headers: Dict[str, str], version: str) -> Optional[str]:
+    """
+    Resolve urn:li:image:... to a download/view URL using the Images API.
+    """
+    if not image_urn or not image_urn.startswith("urn:li:image:"):
+        return None
+
+    img = _li_get_json(
+        f"https://api.linkedin.com/rest/images/{image_urn}",
+        headers=headers
+    )
+    if not img:
+        return None
+
+    return _extract_image_download_url(img)
+
+
+def _resolve_linkedin_video_urn(video_urn: str, headers: Dict[str, str], version: str) -> Dict[str, Optional[str]]:
+    """
+    Resolve urn:li:video:... to media/thumbnail URLs using the Videos API.
+    """
+    if not video_urn or not video_urn.startswith("urn:li:video:"):
+        return {"mediaUrl": None, "thumbnailUrl": None}
+
+    vid = _li_get_json(
+        f"https://api.linkedin.com/rest/videos/{video_urn}",
+        headers=headers
+    )
+    if not vid:
+        return {"mediaUrl": None, "thumbnailUrl": None}
+
+    return _extract_video_urls(vid)
+
+
+def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: str) -> Dict[str, Any]:
+    """
+    Best-effort media normalization for UI rendering.
+    Adds browser-usable URLs where LinkedIn posts only provide URNs.
+    """
+    content = post.get("content")
+    if not isinstance(content, dict):
+        return post
+
+    # 1) Article thumbnail image URN
+    article = content.get("article")
+    if isinstance(article, dict):
+        thumb = article.get("thumbnail")
+        if isinstance(thumb, str) and thumb.startswith("urn:li:image:"):
+            resolved = _resolve_linkedin_image_urn(thumb, headers, version)
+            if resolved:
+                article["thumbnail"] = resolved
+                content["thumbnail"] = resolved
+
+    # 2) Media block
+    media = content.get("media")
+    if isinstance(media, dict):
+        media_id = media.get("id")
+        if isinstance(media_id, str):
+            if media_id.startswith("urn:li:image:"):
+                resolved = _resolve_linkedin_image_urn(media_id, headers, version)
+                if resolved:
+                    media["thumbnailUrl"] = resolved
+                    media["url"] = resolved
+                    content["thumbnail"] = content.get("thumbnail") or resolved
+            elif media_id.startswith("urn:li:video:"):
+                resolved_video = _resolve_linkedin_video_urn(media_id, headers, version)
+                if resolved_video.get("thumbnailUrl"):
+                    media["thumbnailUrl"] = resolved_video["thumbnailUrl"]
+                    content["thumbnail"] = content.get("thumbnail") or resolved_video["thumbnailUrl"]
+                if resolved_video.get("mediaUrl"):
+                    media["mediaUrl"] = resolved_video["mediaUrl"]
+
+    # 3) Multi-image gallery
+    multi = content.get("multiImage")
+    if isinstance(multi, dict) and isinstance(multi.get("images"), list):
+        enriched_images = []
+        for img in multi["images"]:
+            if not isinstance(img, dict):
+                enriched_images.append(img)
+                continue
+
+            img_id = img.get("id")
+            if isinstance(img_id, str) and img_id.startswith("urn:li:image:"):
+                resolved = _resolve_linkedin_image_urn(img_id, headers, version)
+                if resolved:
+                    img["url"] = resolved
+                    img["thumbnailUrl"] = resolved
+                    if not content.get("thumbnail"):
+                        content["thumbnail"] = resolved
+
+            enriched_images.append(img)
+
+        multi["images"] = enriched_images
+
+    post["content"] = content
+
+    # Helpful normalized label for the UI
+    if article and isinstance(article, dict) and article.get("title"):
+        post["postType"] = "article"
+    elif isinstance(content.get("multiImage"), dict):
+        post["postType"] = "gallery"
+    elif isinstance(content.get("media"), dict):
+        media_id = content["media"].get("id")
+        if isinstance(media_id, str) and media_id.startswith("urn:li:video:"):
+            post["postType"] = "video"
+        else:
+            post["postType"] = "image"
+    else:
+        post["postType"] = "text"
+
+    return post
+
+
+
+
 def _cors_headers(req: func.HttpRequest) -> Dict[str, str]:
     origin = req.headers.get("origin") or req.headers.get("Origin") or ""
     if origin in ALLOWED_ORIGINS:

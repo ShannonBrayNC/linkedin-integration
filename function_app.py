@@ -61,10 +61,6 @@ def _li_get_json(url: str, headers: Dict[str, str], params: Optional[Dict[str, A
 
 
 def _extract_image_download_url(image_obj: Dict[str, Any]) -> Optional[str]:
-    """
-    Best-effort extraction for LinkedIn Images API responses.
-    Prefer downloadUrl if present, otherwise fall back to other likely fields.
-    """
     candidates = [
         image_obj.get("downloadUrl"),
         image_obj.get("url"),
@@ -74,7 +70,6 @@ def _extract_image_download_url(image_obj: Dict[str, Any]) -> Optional[str]:
         image_obj.get("previewUrl"),
     ]
 
-    # Common nested patterns
     if isinstance(image_obj.get("data"), dict):
         data = image_obj["data"]
         candidates.extend([
@@ -100,9 +95,6 @@ def _extract_image_download_url(image_obj: Dict[str, Any]) -> Optional[str]:
 
 
 def _extract_video_urls(video_obj: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Best-effort extraction for LinkedIn Videos API responses.
-    """
     out: Dict[str, Any] = {
         "mediaUrl": None,
         "thumbnailUrl": None,
@@ -145,52 +137,6 @@ def _extract_video_urls(video_obj: Dict[str, Any]) -> Dict[str, Any]:
             break
 
     return out
-    """
-    Best-effort extraction for LinkedIn Videos API responses.
-    """
-    out: Dict[str, Any] = {
-        "mediaUrl": None,
-        "thumbnailUrl": None,
-    }
-
-    media_candidates = [
-        video_obj.get("downloadUrl"),
-        video_obj.get("url"),
-        video_obj.get("mediaUrl"),
-        video_obj.get("originalUrl"),
-        video_obj.get("playableUrl"),
-    ]
-
-    thumb_candidates = [
-        video_obj.get("thumbnailUrl"),
-        video_obj.get("previewUrl"),
-    ]
-
-    if isinstance(video_obj.get("data"), dict):
-        data = video_obj["data"]
-        media_candidates.extend([
-            data.get("downloadUrl"),
-            data.get("url"),
-            data.get("mediaUrl"),
-            data.get("playableUrl"),
-        ])
-        thumb_candidates.extend([
-            data.get("thumbnailUrl"),
-            data.get("previewUrl"),
-        ])
-
-    for c in media_candidates:
-        if isinstance(c, str) and c.strip():
-            out["mediaUrl"] = c.strip()
-            break
-
-    for c in thumb_candidates:
-        if isinstance(c, str) and c.strip():
-            out["thumbnailUrl"] = c.strip()
-            break
-
-    return out
-
 
 
 def _resolve_linkedin_image_urn(image_urn: str, headers: Dict[str, str], version: str) -> Dict[str, Any]:
@@ -241,13 +187,7 @@ def _resolve_linkedin_video_urn(video_urn: str, headers: Dict[str, str], version
     return extracted
 
 
-
-
 def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: str) -> Dict[str, Any]:
-    """
-    Best-effort media normalization for UI rendering.
-    Adds browser-usable URLs where LinkedIn posts only provide URNs.
-    """
     content = post.get("content")
     if not isinstance(content, dict):
         return post
@@ -257,9 +197,15 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
     if isinstance(article, dict):
         thumb = article.get("thumbnail")
         if isinstance(thumb, str) and thumb.startswith("urn:li:image:"):
-   
-   
-            resolved = _resolve_linkedin_image_urn(thumb, headers, version)
+            image_result = _resolve_linkedin_image_urn(thumb, headers, version)
+            resolved = image_result.get("resolvedUrl")
+            post["_mediaDebug"] = {
+                "mediaId": thumb,
+                "mediaType": "article-image",
+                "status": image_result.get("status"),
+                "resolvedUrl": resolved,
+                "body": image_result.get("body"),
+            }
             if resolved:
                 article["thumbnail"] = resolved
                 content["thumbnail"] = resolved
@@ -270,9 +216,6 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
         media_id = media.get("id")
         if isinstance(media_id, str):
             if media_id.startswith("urn:li:image:"):
-                
-                
-                
                 image_result = _resolve_linkedin_image_urn(media_id, headers, version)
                 resolved = image_result.get("resolvedUrl")
                 post["_mediaDebug"] = {
@@ -286,8 +229,6 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
                     media["thumbnailUrl"] = resolved
                     media["url"] = resolved
                     content["thumbnail"] = content.get("thumbnail") or resolved
-
-
 
             elif media_id.startswith("urn:li:video:"):
                 resolved_video = _resolve_linkedin_video_urn(media_id, headers, version)
@@ -316,7 +257,8 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
 
             img_id = img.get("id")
             if isinstance(img_id, str) and img_id.startswith("urn:li:image:"):
-                resolved = _resolve_linkedin_image_urn(img_id, headers, version)
+                image_result = _resolve_linkedin_image_urn(img_id, headers, version)
+                resolved = image_result.get("resolvedUrl")
                 if resolved:
                     img["url"] = resolved
                     img["thumbnailUrl"] = resolved
@@ -329,7 +271,6 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
 
     post["content"] = content
 
-    # Helpful normalized label for the UI
     if article and isinstance(article, dict) and article.get("title"):
         post["postType"] = "article"
     elif isinstance(content.get("multiImage"), dict):
@@ -344,9 +285,6 @@ def _enrich_post_media(post: Dict[str, Any], headers: Dict[str, str], version: s
         post["postType"] = "text"
 
     return post
-
-
-
 
 def _cors_headers(req: func.HttpRequest) -> Dict[str, str]:
     origin = req.headers.get("origin") or req.headers.get("Origin") or ""

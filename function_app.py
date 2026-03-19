@@ -617,6 +617,16 @@ def linkedin_org_posts(req: func.HttpRequest) -> func.HttpResponse:
         if not isinstance(items, list):
             items = []
 
+        # Enrich media URNs into browser-usable URLs before caching/returning
+        enriched_items = []
+        for item in items:
+            if isinstance(item, dict):
+                enriched_items.append(_enrich_post_media(item, headers, version))
+            else:
+                enriched_items.append(item)
+
+        items = enriched_items
+
         expires = now + timedelta(seconds=ttl)
         payload = {
             "syncStatus": "OK",

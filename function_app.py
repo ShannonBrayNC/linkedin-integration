@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional
 
 import azure.functions as func
 
+from urllib.parse import quote
+
 from shared.cache_backend import (
     compute_etag,
     get_cache_backend,
@@ -143,8 +145,9 @@ def _resolve_linkedin_image_urn(image_urn: str, headers: Dict[str, str], version
     if not image_urn or not image_urn.startswith("urn:li:image:"):
         return {"resolvedUrl": None, "status": None, "body": None}
 
+    encoded_urn = quote(image_urn, safe="")
     result = _li_get_json(
-        f"https://api.linkedin.com/rest/images/{image_urn}",
+        f"https://api.linkedin.com/rest/images/{encoded_urn}",
         headers=headers
     )
 
@@ -167,8 +170,9 @@ def _resolve_linkedin_video_urn(video_urn: str, headers: Dict[str, str], version
     if not video_urn or not video_urn.startswith("urn:li:video:"):
         return {"mediaUrl": None, "thumbnailUrl": None, "status": None, "body": None}
 
+    encoded_urn = quote(video_urn, safe="")
     result = _li_get_json(
-        f"https://api.linkedin.com/rest/videos/{video_urn}",
+        f"https://api.linkedin.com/rest/videos/{encoded_urn}",
         headers=headers
     )
 

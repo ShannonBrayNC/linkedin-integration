@@ -1,0 +1,99 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Card Assistant</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    pre { background:#f6f6f6; padding: 12px; overflow:auto; }
+    .bar { display:flex; gap:10px; align-items:center; margin-bottom: 12px; flex-wrap: wrap; }
+    .bar code { background:#f6f6f6; padding: 2px 6px; border-radius: 6px; }
+    button { padding: 8px 10px; }
+  </style>
+</head>
+<body>
+  <h2>Card Details</h2>
+
+  <div class="bar">
+    <div>cardId: <code id="cid"></code></div>
+    <div>apiBase: <code id="base"></code></div>
+    <div>session: <code id="sess"></code></div>
+    <button onclick="getSession()">Get Session</button>
+    <button onclick="run()">Reload</button>
+  </div>
+
+  <div id="out">Loading…</div>
+
+<script>
+  function qs(name){ return new URLSearchParams(location.search).get(name); }
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  const cardId  = qs("cardId")  || "demo-card";
+  const apiBase = (qs("apiBase") || "http://localhost:7071").replace(/\/+$/,'');
+  const session = qs("session") || "";
+
+  document.getElementById("cid").textContent  = cardId;
+  document.getElementById("base").textContent = apiBase;
+  document.getElementById("sess").textContent = session ? (session.slice(0,16) + "…") : "(missing)";
+
+  async function fetchJsonOrText(url, opts){
+    const res = await fetch(url, opts);
+    const text = await res.text(); // read once
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
+    return { ok: res.ok, status: res.status, statusText: res.statusText, text, json };
+  }
+
+  async  function getSession(){
+    // Return back to THIS page preserving cardId + apiBase
+    const returnUrl = new URL(window.location.href);
+    returnUrl.searchParams.set("cardId", cardId);
+    returnUrl.searchParams.set("apiBase", apiBase);
+
+    const res = await fetch(`${apiBase}/api/dev/session?enabled=true`);
+    const j = await res.json();
+    document.getElementById("session").value = j.session; // designer
+
+    const authUrl = new URL(`${apiBase}/api/authenticate`);
+    authUrl.searchParams.set("token", "dev");      // DEV_BYPASS_AAD_VALIDATION=true makes this acceptable
+    authUrl.searchParams.set("channel", "local");
+    authUrl.searchParams.set("returnUrl", returnUrl.toString());
+
+    window.location.href = authUrl.toString();
+  }
+
+  async function run(){
+    try {
+      if (!session) {
+        document.getElementById("out").innerHTML =
+          `<p><b>Missing session.</b> Click <b>Get Session</b> above.</p>`;
+        return;
+      }
+
+      const cardUrl = `${apiBase}/api/cards/${encodeURIComponent(cardId)}?session=${encodeURIComponent(session)}`;
+      const renderUrl = `${apiBase}/api/cards/${encodeURIComponent(cardId)}/render?session=${encodeURIComponent(session)}`;
+
+      const cardRes = await fetchJsonOrText(cardUrl);
+      const renderRes = await fetchJsonOrText(renderUrl);
+
+      if (!cardRes.ok || !renderRes.ok) {
+        document.getElementById("out").innerHTML =
+          `<h3>Card (HTTP ${cardRes.status})</h3><pre>${escapeHtml(cardRes.json ? JSON.stringify(cardRes.json, null, 2) : cardRes.text)}</pre>
+           <h3>Render (HTTP ${renderRes.status})</h3><pre>${escapeHtml(renderRes.json ? JSON.stringify(renderRes.json, null, 2) : renderRes.text)}</pre>`;
+        return;
+      }
+
+      document.getElementById("out").innerHTML =
+        `<h3>Card</h3><pre>${escapeHtml(JSON.stringify(cardRes.json, null, 2))}</pre>
+         <h3>Render</h3><pre>${escapeHtml(JSON.stringify(renderRes.json, null, 2))}</pre>`;
+    } catch (e) {
+      document.getElementById("out").innerHTML = `<pre>${escapeHtml(String(e))}</pre>`;
+    }
+  }
+
+  run();
+</script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Card Designer</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    textarea { width: 100%; height: 320px; }
+    .row { display:flex; gap:12px; }
+    input { width: 100%; padding: 8px; }
+    button { padding: 10px 14px; }
+    .hint { font-size: 12px; opacity: 0.8; margin-top: 6px; }
+    .status { margin: 10px 0; padding: 8px 10px; background: #f6f6f6; }
+  </style>
+</head>
+<body>
+  <h2>Card Designer</h2>
+
+  <div class="row">
+    <div style="flex:1">
+      <label>Card ID</label>
+      <input id="cardId" />
+    </div>
+    <div style="flex:2">
+      <label>API Base</label>
+      <input id="apiBase" placeholder="http://localhost:7071" />
+    </div>
+  </div>
+
+  <p>
+    <label>Session</label>
+    <input id="session" />
+    <div class="hint">Tip: click <b>Get Session</b> first (works when <code>DEV_BYPASS_AAD_VALIDATION=true</code>).</div>
+  </p>
+
+  <div id="status" class="status" style="display:none"></div>
+
+  <p><label>Card JSON</label></p>
+  <textarea id="json"></textarea>
+
+  <p class="row">
+    <button onclick="loadCard()">Load</button>
+    <button onclick="saveCard()">Save</button>
+    <button onclick="cancel()">Cancel</button>
+    <button onclick="getSession()">Get Session</button>
+  </p>
+
+<script>
+  function qs(name){ return new URLSearchParams(location.search).get(name); }
+
+  // Defaults
+  document.getElementById("cardId").value  = qs("cardId")  || "demo-card";
+  document.getElementById("session").value = qs("session") || "";
+  document.getElementById("apiBase").value = qs("apiBase") || "http://localhost:7071";
+
+  function setStatus(msg){
+    const el = document.getElementById("status");
+    el.style.display = "block";
+    el.textContent = msg;
+  }
+
+  function clearStatus(){
+    const el = document.getElementById("status");
+    el.style.display = "none";
+    el.textContent = "";
+  }
+
+  function getInputs(){
+    return {
+      cardId: document.getElementById("cardId").value.trim() || "demo-card",
+      apiBase: document.getElementById("apiBase").value.trim().replace(/\/+$/,''),
+      session: document.getElementById("session").value.trim()
+    };
+  }
+
+  // DEV helper: bounce through /api/authenticate and get redirected back with ?session=...
+  function getSession(){
+    const { cardId, apiBase } = getInputs();
+
+    const returnUrl = new URL(window.location.href);
+    returnUrl.searchParams.set("cardId", cardId);
+    returnUrl.searchParams.set("apiBase", apiBase);
+    // clear any stale session so we know we got a fresh one
+    returnUrl.searchParams.delete("session");
+
+    const authUrl = new URL(`${apiBase}/api/authenticate`);
+    authUrl.searchParams.set("token", "dev");
+    authUrl.searchParams.set("channel", "local");
+    authUrl.searchParams.set("returnUrl", returnUrl.toString());
+
+    window.location.href = authUrl.toString();
+  }
+
+  async function loadCard(){
+    clearStatus();
+    const { cardId, apiBase, session } = getInputs();
+    if (!session){
+      setStatus("Missing session. Click 'Get Session' first.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${apiBase}/api/cards/${encodeURIComponent(cardId)}?session=${encodeURIComponent(session)}`);
+      if (!res.ok) throw new Error(`Load failed: ${res.status} ${await res.text()}`);
+      const card = await res.json();
+      document.getElementById("json").value = JSON.stringify(card, null, 2);
+    } catch (err) {
+      setStatus(String(err));
+      document.getElementById("json").value = JSON.stringify({ error: String(err), hint: "Fetch failed (likely CORS or API not running)." }, null, 2);
+    }
+  }
+
+  async function saveCard(){
+    clearStatus();
+    const { cardId, apiBase, session } = getInputs();
+    if (!session){
+      setStatus("Missing session. Click 'Get Session' first.");
+      return;
+    }
+
+    let body;
+    try {
+      body = JSON.parse(document.getElementById("json").value || "{}");
+    } catch (e) {
+      setStatus("Invalid JSON in textarea.");
+      return;
+    }
+
+    const res = await fetch(`${apiBase}/api/cards/${encodeURIComponent(cardId)}?session=${encodeURIComponent(session)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok && res.status !== 204) {
+      const t = await res.text();
+      setStatus(`Save failed: ${res.status} ${t}`);
+      return;
+    }
+
+    // Build assistant URL relative to THIS page host (works on localhost:5175, Azure, etc.)
+    const assistantUrl = new URL("assistant.html", window.location.href);
+    assistantUrl.searchParams.set("cardId", cardId);
+    assistantUrl.searchParams.set("apiBase", apiBase);
+    assistantUrl.searchParams.set("session", session);
+
+    window.parent.postMessage(
+      { type: "card-created", cardId, cardUrl: assistantUrl.toString(), apiBase },
+      "*"
+    );
+
+    setStatus("Saved.");
+  }
+
+  function cancel(){
+    window.parent.postMessage({ type: "card-cancel" }, "*");
+  }
+
+  // Auto-load if we have a session in the URL
+  if (document.getElementById("session").value) {
+    loadCard();
+  }
+</script>
+</body>
+</html>

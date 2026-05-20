@@ -33,7 +33,10 @@ jobs:
 
       - name: Repo inventory
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = "Continue"
+
           $report = [ordered]@{
             repo = "${{ github.repository }}"
             runId = "${{ github.event.inputs.run_id }}"
@@ -49,94 +52,99 @@ jobs:
 
           $repoRoot = (Get-Location).Path
 
-          $report.files = Get-ChildItem -Recurse -File |
-            Where-Object { $_.FullName -notlike "*\.git\*" } |
-            Select-Object -First 300 |
-            ForEach-Object {
-              $_.FullName.Replace($repoRoot + "\", "")
-            }
+          try {
+            $report.files = Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notlike "*\.git\*" } |
+              Select-Object -First 300 |
+              ForEach-Object { $_.FullName.Replace($repoRoot + "\", "") }
+          }
+          catch {
+            $report.inventoryError = $_.Exception.Message
+          }
 
           $report | ConvertTo-Json -Depth 8 | Out-File .echocode-out/repo-assessment.json -Encoding utf8
+          exit 0
 
       - name: PowerShell syntax diagnostics
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = "Continue"
           $errors = @()
 
-          Get-ChildItem -Recurse -Filter *.ps1 |
-            Where-Object { $_.FullName -notlike "*\.git\*" } |
-            ForEach-Object {
-              $parseErrors = $null
-              $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$parseErrors)
-              if ($parseErrors) {
-                $errors += [pscustomobject]@{
-                  file = $_.FullName
-                  errors = $parseErrors | ForEach-Object { $_.Message }
+          try {
+            Get-ChildItem -Recurse -Filter *.ps1 -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notlike "*\.git\*" } |
+              ForEach-Object {
+                $parseErrors = $null
+                $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$parseErrors)
+                if ($parseErrors) {
+                  $errors += [pscustomobject]@{
+                    file = $_.FullName
+                    errors = $parseErrors | ForEach-Object { $_.Message }
+                  }
                 }
               }
+          }
+          catch {
+            $errors += [pscustomobject]@{
+              file = "syntax-scan"
+              errors = @($_.Exception.Message)
             }
+          }
 
           $errors | ConvertTo-Json -Depth 5 | Out-File .echocode-out/powershell-syntax.json -Encoding utf8
-
-          if ($errors.Count -gt 0) {
-            Write-Warning "PowerShell syntax issues found. Recorded in artifact, but assessment continues."
-          }
+          exit 0
 
       - name: Python diagnostics if present
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = "Continue"
+
           if (Test-Path "pyproject.toml" -or Test-Path "requirements.txt" -or Test-Path "pytest.ini") {
             "Python project marker found." | Out-File .echocode-out/python-diagnostics.txt
             python --version | Tee-Object -FilePath .echocode-out/python-diagnostics.txt -Append
-
-            try {
-              python -m pip install --upgrade pip
-              pip install pytest
-              pytest --collect-only | Tee-Object -FilePath .echocode-out/pytest-collect.txt
-            }
-            catch {
-              "Python diagnostic failed: $($_.Exception.Message)" | Out-File .echocode-out/pytest-collect.txt
-            }
+            python -m pip install --upgrade pip 2>&1 | Tee-Object -FilePath .echocode-out/pip-upgrade.txt
+            pip install pytest 2>&1 | Tee-Object -FilePath .echocode-out/pip-pytest.txt
+            pytest --collect-only 2>&1 | Tee-Object -FilePath .echocode-out/pytest-collect.txt
+            "LASTEXITCODE=$LASTEXITCODE" | Out-File .echocode-out/python-exitcode.txt
           }
           else {
             "No Python test marker found." | Out-File .echocode-out/python-diagnostics.txt
           }
 
+          exit 0
+
       - name: Node diagnostics if present
         shell: pwsh
+        continue-on-error: true
         run: |
+          $ErrorActionPreference = "Continue"
+
           if (Test-Path "package.json") {
             "Node project marker found." | Out-File .echocode-out/node-diagnostics.txt
             node --version | Tee-Object -FilePath .echocode-out/node-diagnostics.txt -Append
             npm --version | Tee-Object -FilePath .echocode-out/node-diagnostics.txt -Append
 
-            try {
-              npm ci --ignore-scripts | Tee-Object -FilePath .echocode-out/npm-ci.txt
-            }
-            catch {
-              "npm ci failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-ci.txt
-            }
+            npm ci --ignore-scripts 2>&1 | Tee-Object -FilePath .echocode-out/npm-ci.txt
+            "npm-ci-LASTEXITCODE=$LASTEXITCODE" | Out-File .echocode-out/npm-ci-exitcode.txt
 
-            try {
-              npm test --if-present | Tee-Object -FilePath .echocode-out/npm-test.txt
-            }
-            catch {
-              "npm test failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-test.txt
-            }
+            npm test --if-present 2>&1 | Tee-Object -FilePath .echocode-out/npm-test.txt
+            "npm-test-LASTEXITCODE=$LASTEXITCODE" | Out-File .echocode-out/npm-test-exitcode.txt
 
-            try {
-              npm run build --if-present | Tee-Object -FilePath .echocode-out/npm-build.txt
-            }
-            catch {
-              "npm build failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-build.txt
-            }
+            npm run build --if-present 2>&1 | Tee-Object -FilePath .echocode-out/npm-build.txt
+            "npm-build-LASTEXITCODE=$LASTEXITCODE" | Out-File .echocode-out/npm-build-exitcode.txt
           }
           else {
             "No package.json found." | Out-File .echocode-out/node-diagnostics.txt
           }
 
+          exit 0
+
       - name: Write assessment conclusion
         shell: pwsh
+        if: always()
         run: |
           $summary = [ordered]@{
             repo = "${{ github.repository }}"
@@ -146,6 +154,7 @@ jobs:
           }
 
           $summary | ConvertTo-Json -Depth 5 | Out-File .echocode-out/assessment-summary.json -Encoding utf8
+          exit 0
 
       - name: Upload assessment artifacts
         uses: actions/upload-artifact@v4

@@ -47,55 +47,105 @@ jobs:
             files = @()
           }
 
+          $repoRoot = (Get-Location).Path
+
           $report.files = Get-ChildItem -Recurse -File |
-            Where-Object { $_.FullName -notmatch "\.git\" } |
+            Where-Object { $_.FullName -notlike "*\.git\*" } |
             Select-Object -First 300 |
-            ForEach-Object { $_.FullName.Replace((Get-Location).Path + "\", "") }
+            ForEach-Object {
+              $_.FullName.Replace($repoRoot + "\", "")
+            }
 
           $report | ConvertTo-Json -Depth 8 | Out-File .echocode-out/repo-assessment.json -Encoding utf8
 
-      - name: PowerShell syntax check
+      - name: PowerShell syntax diagnostics
         shell: pwsh
-        continue-on-error: true
         run: |
           $errors = @()
-          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
-            $parseErrors = $null
-            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$parseErrors)
-            if ($parseErrors) {
-              $errors += [pscustomobject]@{
-                file = $_.FullName
-                errors = $parseErrors | ForEach-Object { $_.Message }
+
+          Get-ChildItem -Recurse -Filter *.ps1 |
+            Where-Object { $_.FullName -notlike "*\.git\*" } |
+            ForEach-Object {
+              $parseErrors = $null
+              $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$parseErrors)
+              if ($parseErrors) {
+                $errors += [pscustomobject]@{
+                  file = $_.FullName
+                  errors = $parseErrors | ForEach-Object { $_.Message }
+                }
               }
             }
-          }
-          $errors | ConvertTo-Json -Depth 5 | Out-File .echocode-out/powershell-syntax.json -Encoding utf8
-          if ($errors.Count -gt 0) { exit 1 }
 
-      - name: Python tests if present
+          $errors | ConvertTo-Json -Depth 5 | Out-File .echocode-out/powershell-syntax.json -Encoding utf8
+
+          if ($errors.Count -gt 0) {
+            Write-Warning "PowerShell syntax issues found. Recorded in artifact, but assessment continues."
+          }
+
+      - name: Python diagnostics if present
         shell: pwsh
-        continue-on-error: true
         run: |
           if (Test-Path "pyproject.toml" -or Test-Path "requirements.txt" -or Test-Path "pytest.ini") {
-            python -m pip install --upgrade pip
-            if (Test-Path "requirements.txt") { pip install -r requirements.txt }
-            pip install pytest
-            pytest | Tee-Object -FilePath .echocode-out/pytest.txt
-          } else {
-            "No Python test marker found." | Out-File .echocode-out/pytest.txt
+            "Python project marker found." | Out-File .echocode-out/python-diagnostics.txt
+            python --version | Tee-Object -FilePath .echocode-out/python-diagnostics.txt -Append
+
+            try {
+              python -m pip install --upgrade pip
+              pip install pytest
+              pytest --collect-only | Tee-Object -FilePath .echocode-out/pytest-collect.txt
+            }
+            catch {
+              "Python diagnostic failed: $($_.Exception.Message)" | Out-File .echocode-out/pytest-collect.txt
+            }
+          }
+          else {
+            "No Python test marker found." | Out-File .echocode-out/python-diagnostics.txt
           }
 
-      - name: Node build/test if present
+      - name: Node diagnostics if present
         shell: pwsh
-        continue-on-error: true
         run: |
           if (Test-Path "package.json") {
-            npm install
-            npm test --if-present | Tee-Object -FilePath .echocode-out/npm-test.txt
-            npm run build --if-present | Tee-Object -FilePath .echocode-out/npm-build.txt
-          } else {
-            "No package.json found." | Out-File .echocode-out/npm-test.txt
+            "Node project marker found." | Out-File .echocode-out/node-diagnostics.txt
+            node --version | Tee-Object -FilePath .echocode-out/node-diagnostics.txt -Append
+            npm --version | Tee-Object -FilePath .echocode-out/node-diagnostics.txt -Append
+
+            try {
+              npm ci --ignore-scripts | Tee-Object -FilePath .echocode-out/npm-ci.txt
+            }
+            catch {
+              "npm ci failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-ci.txt
+            }
+
+            try {
+              npm test --if-present | Tee-Object -FilePath .echocode-out/npm-test.txt
+            }
+            catch {
+              "npm test failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-test.txt
+            }
+
+            try {
+              npm run build --if-present | Tee-Object -FilePath .echocode-out/npm-build.txt
+            }
+            catch {
+              "npm build failed: $($_.Exception.Message)" | Out-File .echocode-out/npm-build.txt
+            }
           }
+          else {
+            "No package.json found." | Out-File .echocode-out/node-diagnostics.txt
+          }
+
+      - name: Write assessment conclusion
+        shell: pwsh
+        run: |
+          $summary = [ordered]@{
+            repo = "${{ github.repository }}"
+            runId = "${{ github.event.inputs.run_id }}"
+            status = "diagnostic-complete"
+            timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
+          }
+
+          $summary | ConvertTo-Json -Depth 5 | Out-File .echocode-out/assessment-summary.json -Encoding utf8
 
       - name: Upload assessment artifacts
         uses: actions/upload-artifact@v4

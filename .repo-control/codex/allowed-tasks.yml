@@ -1,0 +1,13 @@
+allowed:
+  - implement_issue
+  - fix_tests
+  - add_tests
+  - update_docs
+  - refactor_bounded
+
+blocked:
+  - auto_merge
+  - production_deploy
+  - secrets_changes
+  - delete_large_sections_without_approval
+  - public_api_breaking_change_without_contract_update

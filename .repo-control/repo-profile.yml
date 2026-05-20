@@ -1,0 +1,21 @@
+name: linkedin-integration
+owner: ShannonBrayNC
+default_branch: master
+lane: active-product
+maturity: scaffold
+primary_language: unknown
+description: Replace with repo purpose.
+
+automation:
+  assessment_enabled: true
+  dispatch_enabled: true
+  codex_allowed: false
+  max_codex_tasks_per_run: 1
+  auto_merge_allowed: false
+
+risk:
+  public_repo: false
+  customer_data_allowed: false
+  secrets_allowed: false
+  production_deployments_allowed: false
+

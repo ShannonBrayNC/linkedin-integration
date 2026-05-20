@@ -1,0 +1,106 @@
+name: EchoCode Repo Assessment
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: EchoCode pipeline run ID
+        required: false
+        default: manual
+      mode:
+        description: Assessment mode
+        required: false
+        default: assess
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  assess:
+    name: Assess repo and run safe checks
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Initialize report folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .echocode-out | Out-Null
+
+      - name: Repo inventory
+        shell: pwsh
+        run: |
+          $report = [ordered]@{
+            repo = "${{ github.repository }}"
+            runId = "${{ github.event.inputs.run_id }}"
+            mode = "${{ github.event.inputs.mode }}"
+            sha = "${{ github.sha }}"
+            ref = "${{ github.ref_name }}"
+            timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
+            controlContractPresent = (Test-Path ".repo-control/repo-profile.yml")
+            testPlanPresent = (Test-Path ".repo-control/test-plan/commands.yml")
+            codexPolicyPresent = (Test-Path ".repo-control/codex/allowed-tasks.yml")
+            files = @()
+          }
+
+          $report.files = Get-ChildItem -Recurse -File |
+            Where-Object { $_.FullName -notmatch "\.git\" } |
+            Select-Object -First 300 |
+            ForEach-Object { $_.FullName.Replace((Get-Location).Path + "\", "") }
+
+          $report | ConvertTo-Json -Depth 8 | Out-File .echocode-out/repo-assessment.json -Encoding utf8
+
+      - name: PowerShell syntax check
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $errors = @()
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $parseErrors = $null
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$parseErrors)
+            if ($parseErrors) {
+              $errors += [pscustomobject]@{
+                file = $_.FullName
+                errors = $parseErrors | ForEach-Object { $_.Message }
+              }
+            }
+          }
+          $errors | ConvertTo-Json -Depth 5 | Out-File .echocode-out/powershell-syntax.json -Encoding utf8
+          if ($errors.Count -gt 0) { exit 1 }
+
+      - name: Python tests if present
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (Test-Path "pyproject.toml" -or Test-Path "requirements.txt" -or Test-Path "pytest.ini") {
+            python -m pip install --upgrade pip
+            if (Test-Path "requirements.txt") { pip install -r requirements.txt }
+            pip install pytest
+            pytest | Tee-Object -FilePath .echocode-out/pytest.txt
+          } else {
+            "No Python test marker found." | Out-File .echocode-out/pytest.txt
+          }
+
+      - name: Node build/test if present
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (Test-Path "package.json") {
+            npm install
+            npm test --if-present | Tee-Object -FilePath .echocode-out/npm-test.txt
+            npm run build --if-present | Tee-Object -FilePath .echocode-out/npm-build.txt
+          } else {
+            "No package.json found." | Out-File .echocode-out/npm-test.txt
+          }
+
+      - name: Upload assessment artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: echocode-repo-assessment
+          path: .echocode-out/**
+          if-no-files-found: warn

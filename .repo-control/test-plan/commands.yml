@@ -1,0 +1,20 @@
+commands:
+  smoke:
+    - name: Repository inventory
+      shell: pwsh
+      run: |
+        Get-ChildItem -Force | Select-Object Name, Length
+
+  test:
+    - name: Default safe test
+      shell: pwsh
+      run: |
+        if (Test-Path "package.json") {
+          npm test --if-present
+        }
+        if (Test-Path "pyproject.toml" -or Test-Path "requirements.txt") {
+          python -m pytest
+        }
+        if (Test-Path ".\tools\Run-Tests.ps1") {
+          .\tools\Run-Tests.ps1
+        }
